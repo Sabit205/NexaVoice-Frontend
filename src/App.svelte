@@ -4,41 +4,69 @@
 
   // --- CONFIGURATION ---
   const SIGNALING_SERVER_URL = "https://nexavoice-backend.onrender.com"; // Keep your Render URL here
-  
-  const ICE_SERVERS = {
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-  };
+  const ICE_SERVERS = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+  // --- SILENT AUDIO FOR BACKGROUND NOTIFICATION ---
+  // This is a 1-second completely silent MP3 file in Base64. 
+  // Looping this forces Android to show the Media Notification panel.
+  const SILENT_MP3 = "data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjUwLjEyLjEwMAAAAAAAAAAAAAAA//MUxAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//MUxEQAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
 
   // --- STATE ---
   let socket;
   let roomCode = "";
   let userName = "";
-  let joined = false;
-  let isConnecting = false; // Prevents double-clicking
-  let localStream;
-  let isMuted = false;
   
-  // peers stores: { pc: RTCPeerConnection, dc: RTCDataChannel }
+  let joined = false;
+  let isConnecting = false;
+  
+  let isMicReady = false; // Tracks if they granted permission on load
+  let localStream;
+  let isMuted = true; // Start muted until they join a room
+  
   let peers = {}; 
-  // users stores: { id, name, stream, speaking, volume, canHearMe }
   let users = []; 
 
-  // --- UI ACTIONS ---
+  // --- REQUEST MIC ON APP OPEN ---
+  onMount(async () => {
+    try {
+      // Ask for permission the moment the app opens
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+          sampleRate: 48000, channelCount: 1, latency: 0
+        },
+        video: false
+      });
+      
+      // Mute it initially so it's not transmitting before they join
+      localStream.getAudioTracks()[0].enabled = false;
+      isMicReady = true;
+      
+    } catch (err) {
+      alert("Microphone permission is required! Please restart the app and allow access.");
+    }
+  });
+
   function audioSetup(node, { stream, volume }) {
     if (stream) node.srcObject = stream;
     node.volume = volume;
     return {
       update(newParams) {
-        if (newParams.stream && node.srcObject !== newParams.stream) {
-          node.srcObject = newParams.stream;
-        }
+        if (newParams.stream && node.srcObject !== newParams.stream) node.srcObject = newParams.stream;
         node.volume = newParams.volume;
       }
     };
   }
 
-  // --- MEDIA NOTIFICATION FOR ANDROID BACKGROUND ---
+  // --- MEDIA NOTIFICATION FOR ANDROID ---
   function setupAndroidNotification() {
+    // 1. Force play the silent audio element to trigger the OS Media Player
+    const bgAudio = document.getElementById('bg-audio');
+    if (bgAudio) {
+      bgAudio.play().catch(e => console.log("Audio play blocked until interaction:", e));
+    }
+
+    // 2. Setup the text and buttons on the Notification Panel
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: `🔴 Live in Room: ${roomCode}`,
@@ -46,7 +74,7 @@
         album: 'Gaming Voice Chat'
       });
 
-      // Map Android Notification "Play" button to Unmute
+      // Map "Play" button to Unmute
       navigator.mediaSession.setActionHandler('play', () => {
         if (!localStream) return;
         isMuted = false;
@@ -54,7 +82,7 @@
         navigator.mediaSession.playbackState = "playing";
       });
       
-      // Map Android Notification "Pause" button to Mute
+      // Map "Pause" button to Mute
       navigator.mediaSession.setActionHandler('pause', () => {
         if (!localStream) return;
         isMuted = true;
@@ -62,7 +90,7 @@
         navigator.mediaSession.playbackState = "paused";
       });
 
-      // Map Android Notification "Stop" button to Disconnect
+      // Map "Stop" button to Disconnect
       navigator.mediaSession.setActionHandler('stop', () => {
         disconnectRoom();
       });
@@ -71,7 +99,6 @@
     }
   }
 
-  // --- AUDIO ACTIVITY DETECTION ---
   function monitorAudioActivity(stream, userId) {
     try {
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -90,28 +117,19 @@
         let avg = sum / bufferLength;
         users = users.map(u => u.id === userId ? { ...u, speaking: avg > 15 } : u);
       }, 150);
-    } catch (err) {
-      console.log("Audio monitor failed", err);
-    }
+    } catch (err) {}
   }
 
-  // --- WEBRTC LOGIC ---
   async function joinRoom() {
+    if (!isMicReady) return alert("Microphone is still loading or permission was denied.");
     if (!userName.trim()) return alert("Please enter your Name");
     if (!roomCode.trim()) return alert("Please enter a Room Code");
-    if (isConnecting) return; // Prevent double clicks
+    if (isConnecting) return; 
 
     isConnecting = true;
 
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true, noiseSuppression: true, autoGainControl: true,
-          sampleRate: 48000, channelCount: 1, latency: 0
-        },
-        video: false
-      });
-
+      // Mic is already captured from onMount, just turn it on!
       isMuted = false;
       localStream.getAudioTracks()[0].enabled = true;
 
@@ -163,7 +181,7 @@
 
     } catch (err) {
       isConnecting = false;
-      alert("Microphone access denied. Please allow permissions.");
+      alert("Error connecting to room.");
     }
   }
 
@@ -171,12 +189,10 @@
     const pc = new RTCPeerConnection(ICE_SERVERS);
     let dc;
 
-    // Add placeholder user to UI until data arrives
     if (!users.find(u => u.id === userId)) {
       users = [...users, { id: userId, name: "Connecting...", stream: null, speaking: false, volume: 1, canHearMe: true }];
     }
 
-    // Handle Data Channel for sending Names directly to peers
     if (isInitiator) {
       dc = pc.createDataChannel('user-info');
       setupDataChannel(dc, userId);
@@ -209,20 +225,15 @@
   }
 
   function setupDataChannel(dc, userId) {
-    dc.onopen = () => {
-      // Send our name to the peer
-      dc.send(JSON.stringify({ type: 'name', name: userName }));
-    };
+    dc.onopen = () => dc.send(JSON.stringify({ type: 'name', name: userName }));
     dc.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'name') {
-        // Update their name in the UI
         users = users.map(u => u.id === userId ? { ...u, name: data.name } : u);
       }
     };
   }
 
-  // --- CONTROLS ---
   function toggleMute() {
     isMuted = !isMuted;
     localStream.getAudioTracks()[0].enabled = !isMuted;
@@ -236,7 +247,6 @@
     users = users.map(u => u.id === id ? { ...u, volume: newVolume } : u);
   }
 
-  // SELECTIVE VOICE: Decide if specific user can hear you
   function toggleSendVoice(userId) {
     const user = users.find(u => u.id === userId);
     if (!user) return;
@@ -246,37 +256,42 @@
 
     const pcData = peers[userId];
     if (pcData && pcData.pc) {
-      // Get the audio track we are sending to this specific person
       const sender = pcData.pc.getSenders()[0];
       if (sender) {
-        // Replace with null to mute, or put localStream track back to unmute
         sender.replaceTrack(newCanHearMe ? localStream.getAudioTracks()[0] : null);
       }
     }
   }
 
-  // DISCONNECT FUNCTION
   function disconnectRoom() {
-    if (localStream) localStream.getTracks().forEach(track => track.stop());
+    // 1. Mute our mic (but don't destroy it so we can join again)
+    isMuted = true;
+    if (localStream) localStream.getAudioTracks()[0].enabled = false;
+    
+    // 2. Stop Peer Connections & Socket
     Object.values(peers).forEach(p => p.pc.close());
     if (socket) socket.disconnect();
     
+    // 3. Stop background silent audio
+    const bgAudio = document.getElementById('bg-audio');
+    if (bgAudio) bgAudio.pause();
+
+    // 4. Clear Notification Panel
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = "none";
+    }
+
     peers = {};
     users = [];
     joined = false;
     isConnecting = false;
-    
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = "none";
-    }
   }
 </script>
 
 <main class="app-container">
-  <!-- Hidden audio to trigger Android Media Notification Panel -->
-  {#if joined}
-    <audio autoplay playsinline muted use:audioSetup={{ stream: localStream, volume: 0 }}></audio>
-  {/if}
+  
+  <!-- THE MAGIC BACKGROUND FIX: Loops silent audio to force Android Notification -->
+  <audio id="bg-audio" loop src={SILENT_MP3}></audio>
 
   {#if !joined}
     <div class="login-wrapper">
@@ -286,11 +301,11 @@
       <p class="subtitle">Zero Delay Gaming Comm</p>
       
       <div class="input-group">
-        <input type="text" placeholder="YOUR NAME" bind:value={userName} disabled={isConnecting} />
-        <input type="text" placeholder="SQUAD CODE" bind:value={roomCode} disabled={isConnecting} />
+        <input type="text" placeholder="YOUR NAME" bind:value={userName} disabled={isConnecting || !isMicReady} />
+        <input type="text" placeholder="SQUAD CODE" bind:value={roomCode} disabled={isConnecting || !isMicReady} />
         
-        <button class="btn-primary" on:click={joinRoom} disabled={isConnecting}>
-          {isConnecting ? 'CONNECTING...' : 'CONNECT TO SQUAD'}
+        <button class="btn-primary" on:click={joinRoom} disabled={isConnecting || !isMicReady}>
+          {!isMicReady ? 'ALLOW MIC PERMISSION...' : (isConnecting ? 'CONNECTING...' : 'CONNECT TO SQUAD')}
         </button>
       </div>
     </div>
@@ -315,13 +330,11 @@
             </div>
 
             {#if user.id !== 'me'}
-              <!-- Volume they output to you -->
               <div class="control-row">
                 <span class="label">Their Mic:</span>
                 <input type="range" min="0" max="1" step="0.05" value={user.volume} on:input={(e) => updateUserVolume(user.id, e)} />
               </div>
               
-              <!-- Selective Voice: Can they hear YOU? -->
               <div class="control-row">
                 <span class="label">Can hear me:</span>
                 <button class="btn-toggle {user.canHearMe ? 'active' : ''}" on:click={() => toggleSendVoice(user.id)}>
