@@ -4,7 +4,7 @@
 
   // --- CONFIGURATION ---
   // Replace this with your deployed Render server URL
-  const SIGNALING_SERVER_URL = "https://your-app.onrender.com"; 
+  const SIGNALING_SERVER_URL = "https://nexavoice-backend.onrender.com"; 
   
   // Put your TURN server credentials here
   const ICE_SERVERS = {
