@@ -1,0 +1,14 @@
+{
+  "appId": "com.nexavoice.app",
+  "appName": "NexaVoice",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "cleartext": true
+  },
+  "cordova": {
+    "preferences": {
+      "KeepRunning": "true"
+    }
+  }
+}
