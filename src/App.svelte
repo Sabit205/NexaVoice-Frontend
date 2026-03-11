@@ -3,19 +3,11 @@
   import { io } from 'socket.io-client';
 
   // --- CONFIGURATION ---
-  // Replace this with your deployed Render server URL
-  const SIGNALING_SERVER_URL = "https://nexavoice-backend.onrender.com"; 
+  const SIGNALING_SERVER_URL = "https://nexavoice-backend.onrender.com"; // Keep your Render URL here
   
-  // Put your TURN server credentials here
   const ICE_SERVERS = {
     iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      // Uncomment and add your TURN server details below:
-      // {
-      //   urls: "turn:your-turn-server.com:3478",
-      //   username: "your_username",
-      //   credential: "your_password"
-      // }
+      { urls: "stun:stun.l.google.com:19302" }
     ]
   };
 
@@ -25,23 +17,24 @@
   let joined = false;
   let localStream;
   let isMuted = false;
-  let isPTTPressed = false;
   
-  let peers = {}; // Stores RTCPeerConnections
-  let users = []; // Stores user state for UI { id, stream, speaking }
+  let peers = {}; 
+  // users array now tracks volume: { id, stream, speaking, volume }
+  let users = []; 
 
-  // Svelte Action to easily attach media streams to <audio> HTML tags
-  function srcObject(node, stream) {
+  // Custom action to attach media streams AND control specific volume
+  function audioSetup(node, { stream, volume }) {
     node.srcObject = stream;
+    node.volume = volume;
     return {
-      update(newStream) {
-        node.srcObject = newStream;
+      update(newParams) {
+        if (node.srcObject !== newParams.stream) node.srcObject = newParams.stream;
+        node.volume = newParams.volume;
       }
     };
   }
 
   // --- AUDIO ACTIVITY DETECTION ---
-  // Runs a lightweight check every 150ms to see who is talking
   function monitorAudioActivity(stream, userId) {
     try {
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -58,35 +51,38 @@
         for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
         let avg = sum / bufferLength;
         
-        // Update the speaking status in the UI
         users = users.map(u => u.id === userId ? { ...u, speaking: avg > 15 } : u);
       }, 150);
     } catch (err) {
-      console.log("Audio activity monitoring failed for user:", userId, err);
+      console.log("Audio activity monitoring failed", err);
     }
   }
 
-  // --- WEBRTC LOGIC ---
+  // --- WEBRTC LOGIC (OPTIMIZED FOR LOW LATENCY & QUALITY) ---
   async function joinRoom() {
     if (!roomCode.trim()) return alert("Enter a room code");
 
     try {
-      // Request Microphone with strict gaming constraints
+      // HIGH QUALITY, LOW LATENCY GAMING AUDIO REQUIRMENTS
       localStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 48000 // Opus default
+          sampleRate: 48000,
+          channelCount: 1, // Mono processes faster than stereo = less delay
+          latency: 0
         },
         video: false
       });
 
-      // Add ourselves to the UI
-      users = [...users, { id: "me", stream: localStream, speaking: false }];
+      // ALWAYS ON VOICE: Mic is active immediately
+      isMuted = false;
+      localStream.getAudioTracks()[0].enabled = true;
+
+      users = [...users, { id: "me", stream: localStream, speaking: false, volume: 1 }];
       monitorAudioActivity(localStream, "me");
 
-      // Connect to Signaling Server
       socket = io(SIGNALING_SERVER_URL);
 
       socket.on('connect', () => {
@@ -94,19 +90,14 @@
         joined = true;
       });
 
-      // When we join, server sends list of people already in room
       socket.on('existing-users', (existingUsers) => {
-        existingUsers.forEach(userId => {
-          createPeerConnection(userId, true);
-        });
+        existingUsers.forEach(userId => createPeerConnection(userId, true));
       });
 
-      // When a new person joins
       socket.on('user-joined', (userId) => {
         createPeerConnection(userId, false);
       });
 
-      // Handle WebRTC Signaling
       socket.on('offer', async (payload) => {
         const pc = createPeerConnection(payload.caller, false);
         await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
@@ -134,7 +125,7 @@
       });
 
     } catch (err) {
-      alert("Microphone access denied or error occurred.");
+      alert("Microphone access denied. Please allow mic permissions.");
       console.error(err);
     }
   }
@@ -143,27 +134,23 @@
     const pc = new RTCPeerConnection(ICE_SERVERS);
     peers[userId] = pc;
 
-    // Send ICE candidates to the other user
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         socket.emit('ice-candidate', { target: userId, candidate: event.candidate });
       }
     };
 
-    // When we receive their audio stream
     pc.ontrack = (event) => {
       const remoteStream = event.streams[0];
-      // Check if user already exists in UI to prevent duplicates
       if (!users.find(u => u.id === userId)) {
-        users = [...users, { id: userId, stream: remoteStream, speaking: false }];
+        // Default new users to 100% volume
+        users = [...users, { id: userId, stream: remoteStream, speaking: false, volume: 1 }];
         monitorAudioActivity(remoteStream, userId);
       }
     };
 
-    // Add our microphone to the connection
     localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-    // If we are the initiator, create the offer
     if (isInitiator) {
       pc.createOffer().then(offer => {
         pc.setLocalDescription(offer);
@@ -180,67 +167,66 @@
     localStream.getAudioTracks()[0].enabled = !isMuted;
   }
 
-  // Push To Talk Logic
-  function handlePTTDown() {
-    if (isMuted) return; // Don't allow PTT if entirely muted
-    isPTTPressed = true;
-    localStream.getAudioTracks()[0].enabled = true;
-  }
-
-  function handlePTTUp() {
-    if (isMuted) return;
-    isPTTPressed = false;
-    localStream.getAudioTracks()[0].enabled = false;
-  }
-
-  // Initially disable mic for Push-to-Talk mode
-  $: if (localStream && !isMuted && !isPTTPressed) {
-     localStream.getAudioTracks()[0].enabled = false;
+  function updateUserVolume(id, event) {
+    const newVolume = parseFloat(event.target.value);
+    users = users.map(u => u.id === id ? { ...u, volume: newVolume } : u);
   }
 </script>
 
-<main class="container">
+<main class="app-container">
   {#if !joined}
-    <div class="login-box">
-      <h1>NexaVoice</h1>
-      <p>Low latency. Low CPU. Pure Voice.</p>
-      <input type="text" placeholder="Enter Room Code" bind:value={roomCode} />
-      <button class="btn-join" on:click={joinRoom}>Join Room</button>
+    <div class="login-wrapper">
+      <div class="logo-box">
+        <div class="pulse-ring"></div>
+        <h1>NEXA<span class="highlight">VOICE</span></h1>
+      </div>
+      <p class="subtitle">Zero Delay Gaming Comm</p>
+      
+      <div class="input-group">
+        <input type="text" placeholder="ENTER SQUAD CODE" bind:value={roomCode} />
+        <button class="btn-primary" on:click={joinRoom}>CONNECT</button>
+      </div>
     </div>
   {:else}
-    <div class="room-box">
-      <div class="header">
-        <h2>Room: {roomCode}</h2>
-        <span class="user-count">{users.length} Connected</span>
-      </div>
+    <div class="room-wrapper">
+      <header class="room-header">
+        <div>
+          <h2 class="squad-title">SQUAD: <span class="highlight">{roomCode}</span></h2>
+          <p class="ping-status">● Connected ({users.length}/10)</p>
+        </div>
+      </header>
 
-      <div class="users-list">
-        {#each users as user}
-          <div class="user-card {user.speaking ? 'speaking' : ''}">
-            <div class="avatar">
-               {user.id === 'me' ? 'Me' : 'P'}
+      <div class="user-grid">
+        {#each users as user (user.id)}
+          <div class="user-card {user.speaking ? 'is-speaking' : ''}">
+            <div class="user-info">
+              <div class="avatar {user.speaking ? 'glow' : ''}">
+                 {user.id === 'me' ? 'ME' : 'P'}
+              </div>
+              <span class="username">{user.id === 'me' ? 'You' : 'Teammate'}</span>
             </div>
-            <span>{user.id === 'me' ? 'You' : 'Player'}</span>
+
             {#if user.id !== 'me'}
-              <!-- Hidden audio tag for remote streams -->
-              <audio autoplay use:srcObject={user.stream}></audio>
+              <!-- SPECIFIC USER VOLUME SLIDER -->
+              <div class="volume-control">
+                <span class="vol-icon">🔊</span>
+                <input 
+                  type="range" 
+                  min="0" max="1" step="0.05" 
+                  value={user.volume} 
+                  on:input={(e) => updateUserVolume(user.id, e)} 
+                />
+              </div>
+              <!-- Hidden Audio tag attached to volume action -->
+              <audio autoplay use:audioSetup={{ stream: user.stream, volume: user.volume }}></audio>
             {/if}
           </div>
         {/each}
       </div>
 
-      <div class="controls">
+      <div class="bottom-bar">
         <button class="btn-mute {isMuted ? 'muted' : ''}" on:click={toggleMute}>
-          {isMuted ? 'Unmute Mic' : 'Mute Mic'}
-        </button>
-
-        <button 
-          class="btn-ptt {isPTTPressed ? 'active' : ''}" 
-          on:pointerdown={handlePTTDown} 
-          on:pointerup={handlePTTUp}
-          on:pointerleave={handlePTTUp}
-        >
-          {isPTTPressed ? 'TALKING...' : 'HOLD TO TALK'}
+          {isMuted ? '🎤 MIC MUTED' : '🎙️ MIC ACTIVE'}
         </button>
       </div>
     </div>
@@ -248,123 +234,212 @@
 </main>
 
 <style>
-  /* Minimalist CSS for fast rendering and low CPU overhead */
-  .container {
+  /* --- GAMER UI STYLES --- */
+  :global(body) {
+    margin: 0;
+    padding: 0;
+    background-color: #0b0b14;
+    color: #ffffff;
+    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    overflow: hidden; /* Prevent scrolling on mobile */
+  }
+
+  .app-container {
+    height: 100vh;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 100vh;
-    padding: 20px;
-    box-sizing: border-box;
+    background: radial-gradient(circle at top, #1a1a3a 0%, #0b0b14 80%);
   }
 
-  .login-box, .room-box {
-    width: 100%;
-    max-width: 400px;
-    background: #252542;
-    padding: 30px;
-    border-radius: 15px;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-    text-align: center;
+  /* LOGIN SCREEN */
+  .login-wrapper {
+    width: 90%;
+    max-width: 350px;
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 20px;
   }
 
-  h1, h2 { margin: 0; color: #fff; }
-  p { margin: 0; color: #a0a0b5; font-size: 14px; }
-
-  input {
-    padding: 15px;
-    border-radius: 8px;
-    border: none;
-    font-size: 18px;
-    text-align: center;
-    background: #1a1a2e;
-    color: white;
-    outline: none;
+  .logo-box {
+    position: relative;
+    margin-bottom: 10px;
   }
 
-  button {
-    padding: 15px;
-    border: none;
-    border-radius: 8px;
-    font-size: 16px;
-    font-weight: bold;
-    cursor: pointer;
-    transition: 0.2s;
-    user-select: none;
+  h1 {
+    font-size: 38px;
+    font-weight: 900;
+    margin: 0;
+    letter-spacing: 2px;
   }
 
-  .btn-join { background: #4caf50; color: white; }
-  .btn-join:active { background: #388e3c; }
+  .highlight { color: #00ff88; }
+  .subtitle { color: #8892b0; font-size: 14px; margin-top: -10px; font-weight: 600; letter-spacing: 1px; }
 
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid #3d3d5c;
-    padding-bottom: 10px;
-  }
-
-  .user-count { font-size: 12px; background: #3d3d5c; padding: 5px 10px; border-radius: 20px;}
-
-  .users-list {
+  .input-group {
+    width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    max-height: 50vh;
+    gap: 15px;
+  }
+
+  input {
+    width: 100%;
+    padding: 18px;
+    border-radius: 12px;
+    border: 2px solid #23233a;
+    background: #111122;
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+    text-align: center;
+    box-sizing: border-box;
+    outline: none;
+    transition: 0.3s;
+  }
+
+  input:focus { border-color: #00ff88; box-shadow: 0 0 15px rgba(0, 255, 136, 0.2); }
+
+  .btn-primary {
+    width: 100%;
+    padding: 18px;
+    border: none;
+    border-radius: 12px;
+    background: #00ff88;
+    color: #0b0b14;
+    font-size: 18px;
+    font-weight: 900;
+    cursor: pointer;
+    box-shadow: 0 5px 20px rgba(0, 255, 136, 0.3);
+    transition: 0.2s;
+  }
+  .btn-primary:active { transform: scale(0.96); }
+
+  /* ROOM SCREEN */
+  .room-wrapper {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .room-header {
+    padding: 20px;
+    background: rgba(17, 17, 34, 0.8);
+    border-bottom: 1px solid #23233a;
+    backdrop-filter: blur(10px);
+  }
+
+  .squad-title { margin: 0; font-size: 20px; font-weight: 800; }
+  .ping-status { margin: 5px 0 0 0; font-size: 12px; color: #00ff88; font-weight: bold; }
+
+  .user-grid {
+    flex: 1;
+    padding: 20px;
     overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
   }
 
   .user-card {
+    background: #15152a;
+    border: 2px solid #23233a;
+    border-radius: 16px;
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    transition: border-color 0.1s;
+  }
+
+  .user-card.is-speaking {
+    border-color: #00ff88;
+    box-shadow: 0 0 15px rgba(0, 255, 136, 0.1);
+  }
+
+  .user-info {
     display: flex;
     align-items: center;
     gap: 15px;
-    background: #1a1a2e;
-    padding: 10px 15px;
-    border-radius: 8px;
-    border: 2px solid transparent;
-    transition: 0.2s;
   }
 
-  /* Voice Activity Indicator */
-  .user-card.speaking { border-color: #4caf50; }
-
   .avatar {
-    width: 40px;
-    height: 40px;
-    background: #3d3d5c;
-    border-radius: 50%;
+    width: 45px;
+    height: 45px;
+    border-radius: 12px;
+    background: #23233a;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: bold;
+    font-weight: 900;
+    color: #fff;
   }
 
-  .user-card.speaking .avatar { background: #4caf50; }
+  .avatar.glow { background: #00ff88; color: #0b0b14; }
+  .username { font-size: 16px; font-weight: bold; }
 
-  .controls {
+  /* VOLUME SLIDER STYLES */
+  .volume-control {
     display: flex;
-    flex-direction: column;
+    align-items: center;
     gap: 10px;
-    margin-top: 10px;
+    background: #0e0e1a;
+    padding: 10px 15px;
+    border-radius: 10px;
   }
 
-  .btn-mute { background: #e0e0e0; color: #333; }
-  .btn-mute.muted { background: #f44336; color: white; }
+  .vol-icon { font-size: 16px; }
 
-  .btn-ptt {
-    background: #2196f3;
-    color: white;
-    height: 80px;
-    font-size: 20px;
+  input[type=range] {
+    -webkit-appearance: none;
+    width: 100%;
+    background: transparent;
+    padding: 0;
+  }
+  
+  input[type=range]::-webkit-slider-runnable-track {
+    width: 100%;
+    height: 6px;
+    background: #23233a;
+    border-radius: 3px;
+  }
+
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    height: 18px;
+    width: 18px;
+    border-radius: 50%;
+    background: #00ff88;
+    margin-top: -6px;
+  }
+
+  /* BOTTOM BAR (ALWAYS ON MIC CONTROL) */
+  .bottom-bar {
+    padding: 20px;
+    background: rgba(17, 17, 34, 0.9);
+    border-top: 1px solid #23233a;
+  }
+
+  .btn-mute {
+    width: 100%;
+    padding: 20px;
     border-radius: 15px;
+    border: none;
+    font-size: 18px;
+    font-weight: 900;
+    background: #00ff88;
+    color: #0b0b14;
+    cursor: pointer;
+    box-shadow: 0 5px 20px rgba(0, 255, 136, 0.2);
+    transition: 0.2s;
   }
-  .btn-ptt.active {
-    background: #ffeb3b;
-    color: black;
-    transform: scale(0.98);
+
+  .btn-mute.muted {
+    background: #ff3366;
+    color: white;
+    box-shadow: 0 5px 20px rgba(255, 51, 102, 0.2);
   }
 </style>
