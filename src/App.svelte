@@ -4,11 +4,22 @@
 
   // --- CONFIGURATION ---
   const SIGNALING_SERVER_URL = "https://nexavoice-backend.onrender.com"; // Keep your Render URL here
-  const ICE_SERVERS = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+  
+  // ⚠️ PUT YOUR TURN SERVER HERE ⚠️
+  const ICE_SERVERS = { 
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" }, // Free Google STUN
+      
+      // UNCOMMENT AND ADD YOUR METERED.CA TURN SERVER HERE:
+      // {
+      //   urls: "turn:YOUR_APP.metered.ca:80",
+      //   username: "YOUR_USERNAME",
+      //   credential: "YOUR_PASSWORD"
+      // }
+    ] 
+  };
 
   // --- SILENT AUDIO FOR BACKGROUND NOTIFICATION ---
-  // This is a 1-second completely silent MP3 file in Base64. 
-  // Looping this forces Android to show the Media Notification panel.
   const SILENT_MP3 = "data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjUwLjEyLjEwMAAAAAAAAAAAAAAA//MUxAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//MUxEQAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
 
   // --- STATE ---
@@ -19,17 +30,17 @@
   let joined = false;
   let isConnecting = false;
   
-  let isMicReady = false; // Tracks if they granted permission on load
+  let isMicReady = false; 
   let localStream;
-  let isMuted = true; // Start muted until they join a room
+  let isMuted = true; 
   
   let peers = {}; 
+  // users now includes 'iceState' for debugging network issues
   let users = []; 
 
   // --- REQUEST MIC ON APP OPEN ---
   onMount(async () => {
     try {
-      // Ask for permission the moment the app opens
       localStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true, noiseSuppression: true, autoGainControl: true,
@@ -38,7 +49,6 @@
         video: false
       });
       
-      // Mute it initially so it's not transmitting before they join
       localStream.getAudioTracks()[0].enabled = false;
       isMicReady = true;
       
@@ -60,13 +70,9 @@
 
   // --- MEDIA NOTIFICATION FOR ANDROID ---
   function setupAndroidNotification() {
-    // 1. Force play the silent audio element to trigger the OS Media Player
     const bgAudio = document.getElementById('bg-audio');
-    if (bgAudio) {
-      bgAudio.play().catch(e => console.log("Audio play blocked until interaction:", e));
-    }
+    if (bgAudio) bgAudio.play().catch(e => console.log(e));
 
-    // 2. Setup the text and buttons on the Notification Panel
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: `🔴 Live in Room: ${roomCode}`,
@@ -74,7 +80,6 @@
         album: 'Gaming Voice Chat'
       });
 
-      // Map "Play" button to Unmute
       navigator.mediaSession.setActionHandler('play', () => {
         if (!localStream) return;
         isMuted = false;
@@ -82,7 +87,6 @@
         navigator.mediaSession.playbackState = "playing";
       });
       
-      // Map "Pause" button to Mute
       navigator.mediaSession.setActionHandler('pause', () => {
         if (!localStream) return;
         isMuted = true;
@@ -90,7 +94,6 @@
         navigator.mediaSession.playbackState = "paused";
       });
 
-      // Map "Stop" button to Disconnect
       navigator.mediaSession.setActionHandler('stop', () => {
         disconnectRoom();
       });
@@ -129,11 +132,11 @@
     isConnecting = true;
 
     try {
-      // Mic is already captured from onMount, just turn it on!
       isMuted = false;
       localStream.getAudioTracks()[0].enabled = true;
 
-      users = [{ id: "me", name: userName, stream: localStream, speaking: false, volume: 1, canHearMe: true }];
+      // 'me' is instantly connected
+      users = [{ id: "me", name: userName, stream: localStream, speaking: false, volume: 1, canHearMe: true, iceState: "connected" }];
       monitorAudioActivity(localStream, "me");
 
       socket = io(SIGNALING_SERVER_URL);
@@ -190,8 +193,14 @@
     let dc;
 
     if (!users.find(u => u.id === userId)) {
-      users = [...users, { id: userId, name: "Connecting...", stream: null, speaking: false, volume: 1, canHearMe: true }];
+      users = [...users, { id: userId, name: "Connecting...", stream: null, speaking: false, volume: 1, canHearMe: true, iceState: "new" }];
     }
+
+    // --- DEBUGGING: WATCH THE NETWORK CONNECTION STATE ---
+    pc.oniceconnectionstatechange = () => {
+      console.log(`Connection state for ${userId}:`, pc.iceConnectionState);
+      users = users.map(u => u.id === userId ? { ...u, iceState: pc.iceConnectionState } : u);
+    };
 
     if (isInitiator) {
       dc = pc.createDataChannel('user-info');
@@ -264,19 +273,15 @@
   }
 
   function disconnectRoom() {
-    // 1. Mute our mic (but don't destroy it so we can join again)
     isMuted = true;
     if (localStream) localStream.getAudioTracks()[0].enabled = false;
     
-    // 2. Stop Peer Connections & Socket
     Object.values(peers).forEach(p => p.pc.close());
     if (socket) socket.disconnect();
     
-    // 3. Stop background silent audio
     const bgAudio = document.getElementById('bg-audio');
     if (bgAudio) bgAudio.pause();
 
-    // 4. Clear Notification Panel
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = "none";
     }
@@ -290,7 +295,6 @@
 
 <main class="app-container">
   
-  <!-- THE MAGIC BACKGROUND FIX: Loops silent audio to force Android Notification -->
   <audio id="bg-audio" loop src={SILENT_MP3}></audio>
 
   {#if !joined}
@@ -322,12 +326,30 @@
       <div class="user-grid">
         {#each users as user (user.id)}
           <div class="user-card {user.speaking ? 'is-speaking' : ''}">
+            
             <div class="user-info">
               <div class="avatar {user.speaking ? 'glow' : ''}">
                  {user.name.charAt(0).toUpperCase()}
               </div>
-              <span class="username">{user.name} {user.id === 'me' ? '(You)' : ''}</span>
+              <div class="name-status">
+                <span class="username">{user.name} {user.id === 'me' ? '(You)' : ''}</span>
+                
+                <!-- DEBUG BADGE -->
+                {#if user.id !== 'me'}
+                  <span class="status-badge {user.iceState}">
+                    Network: {user.iceState}
+                  </span>
+                {/if}
+
+              </div>
             </div>
+
+            <!-- WARNING IF ICE FAILS -->
+            {#if user.iceState === 'failed' || user.iceState === 'disconnected'}
+               <div class="error-box">
+                 ⚠️ Strict NAT Detected! This network blocks STUN. You must add a TURN server to the code to connect on this WiFi.
+               </div>
+            {/if}
 
             {#if user.id !== 'me'}
               <div class="control-row">
@@ -394,7 +416,19 @@
   .user-info { display: flex; align-items: center; gap: 15px; }
   .avatar { width: 45px; height: 45px; border-radius: 12px; background: #23233a; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 20px;}
   .avatar.glow { background: #00ff88; color: #0b0b14; }
+  
+  .name-status { display: flex; flex-direction: column; }
   .username { font-size: 16px; font-weight: bold; }
+  
+  /* STATUS BADGE CSS */
+  .status-badge { font-size: 11px; padding: 3px 8px; border-radius: 5px; font-weight: bold; margin-top: 4px; display: inline-block; width: fit-content; }
+  .status-badge.new { background: #444; color: #ccc; }
+  .status-badge.checking { background: #ffeb3b; color: #000; }
+  .status-badge.connected { background: #00ff88; color: #000; }
+  .status-badge.failed { background: #ff3366; color: #fff; }
+  .status-badge.disconnected { background: #ff3366; color: #fff; }
+
+  .error-box { background: rgba(255, 51, 102, 0.2); border: 1px solid #ff3366; padding: 10px; border-radius: 8px; font-size: 12px; color: #ffb3c6; text-align: center; }
 
   .control-row { display: flex; align-items: center; justify-content: space-between; background: #0e0e1a; padding: 10px; border-radius: 10px; font-size: 14px; font-weight: bold; color: #8892b0;}
   .label { width: 40%; }
