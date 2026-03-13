@@ -3,7 +3,7 @@
   import { io } from 'socket.io-client';
 
   // --- CONFIGURATION ---
-  const SIGNALING_SERVER_URL = "https://your-app.onrender.com"; // Keep your Render URL here
+  const SIGNALING_SERVER_URL = "https://nexavoice-backend.onrender.com"; // Keep your Render URL here
   
   // THE ULTIMATE FIREWALL BYPASS (STUN + TURN)
   const ICE_SERVERS = { 
