@@ -3,19 +3,33 @@
   import { io } from 'socket.io-client';
 
   // --- CONFIGURATION ---
-  const SIGNALING_SERVER_URL = "https://nexavoice-backend.onrender.com"; // Keep your Render URL here
+  const SIGNALING_SERVER_URL = "https://your-app.onrender.com"; // Keep your Render URL here
   
-  // ⚠️ PUT YOUR TURN SERVER HERE ⚠️
+  // THE ULTIMATE FIREWALL BYPASS (STUN + TURN)
   const ICE_SERVERS = { 
     iceServers: [
-      { urls: "stun:stun.l.google.com:19302" }, // Free Google STUN
-      
-      // UNCOMMENT AND ADD YOUR METERED.CA TURN SERVER HERE:
-      // {
-      //   urls: "turn:YOUR_APP.metered.ca:80",
-      //   username: "YOUR_USERNAME",
-      //   credential: "YOUR_PASSWORD"
-      // }
+      { urls: "stun:stun.l.google.com:19302" }, // Backup Google STUN
+      { urls: "stun:stun.relay.metered.ca:80" },
+      {
+        urls: "turn:standard.relay.metered.ca:80",
+        username: "100c812dd6fc42917e39c68c",
+        credential: "xtUXYmdALMY8x3do",
+      },
+      {
+        urls: "turn:standard.relay.metered.ca:80?transport=tcp",
+        username: "100c812dd6fc42917e39c68c",
+        credential: "xtUXYmdALMY8x3do",
+      },
+      {
+        urls: "turn:standard.relay.metered.ca:443",
+        username: "100c812dd6fc42917e39c68c",
+        credential: "xtUXYmdALMY8x3do",
+      },
+      {
+        urls: "turns:standard.relay.metered.ca:443?transport=tcp",
+        username: "100c812dd6fc42917e39c68c",
+        credential: "xtUXYmdALMY8x3do",
+      }
     ] 
   };
 
@@ -35,7 +49,6 @@
   let isMuted = true; 
   
   let peers = {}; 
-  // users now includes 'iceState' for debugging network issues
   let users = []; 
 
   // --- REQUEST MIC ON APP OPEN ---
@@ -135,7 +148,6 @@
       isMuted = false;
       localStream.getAudioTracks()[0].enabled = true;
 
-      // 'me' is instantly connected
       users = [{ id: "me", name: userName, stream: localStream, speaking: false, volume: 1, canHearMe: true, iceState: "connected" }];
       monitorAudioActivity(localStream, "me");
 
@@ -334,7 +346,7 @@
               <div class="name-status">
                 <span class="username">{user.name} {user.id === 'me' ? '(You)' : ''}</span>
                 
-                <!-- DEBUG BADGE -->
+                <!-- DEBUG BADGE: Watch this turn green anywhere! -->
                 {#if user.id !== 'me'}
                   <span class="status-badge {user.iceState}">
                     Network: {user.iceState}
@@ -344,10 +356,9 @@
               </div>
             </div>
 
-            <!-- WARNING IF ICE FAILS -->
             {#if user.iceState === 'failed' || user.iceState === 'disconnected'}
                <div class="error-box">
-                 ⚠️ Strict NAT Detected! This network blocks STUN. You must add a TURN server to the code to connect on this WiFi.
+                 ⚠️ Connection failed. Retrying...
                </div>
             {/if}
 
@@ -420,11 +431,11 @@
   .name-status { display: flex; flex-direction: column; }
   .username { font-size: 16px; font-weight: bold; }
   
-  /* STATUS BADGE CSS */
-  .status-badge { font-size: 11px; padding: 3px 8px; border-radius: 5px; font-weight: bold; margin-top: 4px; display: inline-block; width: fit-content; }
+  .status-badge { font-size: 11px; padding: 3px 8px; border-radius: 5px; font-weight: bold; margin-top: 4px; display: inline-block; width: fit-content; text-transform: uppercase; }
   .status-badge.new { background: #444; color: #ccc; }
   .status-badge.checking { background: #ffeb3b; color: #000; }
   .status-badge.connected { background: #00ff88; color: #000; }
+  .status-badge.completed { background: #00ff88; color: #000; }
   .status-badge.failed { background: #ff3366; color: #fff; }
   .status-badge.disconnected { background: #ff3366; color: #fff; }
 
